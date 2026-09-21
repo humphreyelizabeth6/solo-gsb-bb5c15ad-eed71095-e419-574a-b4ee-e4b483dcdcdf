@@ -13,6 +13,7 @@ from .models import (
     DesignOut,
     DesignSummary,
     ErrorOut,
+    RepairPlanOut,
     TieUpSuggestionOut,
     Violation,
 )
@@ -141,3 +142,35 @@ def suggest_tie_up(
         stored["cyclic"],
     )
     return [s.to_dict() for s in suggestions[:limit]]
+
+
+@app.post(
+    "/designs/{design_id}/repair-plans",
+    response_model=list[RepairPlanOut],
+    responses={404: {"model": ErrorOut, "description": "设计不存在"}},
+    tags=["designs"],
+)
+def suggest_repair_plans(
+    design_id: int,
+    max_changes: int = Query(
+        default=2, ge=1, le=3, description="最多搜索的绑综翻转次数（1～3）"
+    ),
+    limit: int = Query(default=50, ge=1, le=50, description="返回方案数上限"),
+) -> list[dict]:
+    """多步绑综修复方案：在最多 max_changes 次绑综单元翻转内（中间状态允许
+    违规数不下降）搜索，仅返回最终违规总数严格少于原设计的方案。搜索按绑综
+    状态去重、同一单元不重复翻转；按 (最终违规数, 改动数, 最终矩阵相对原矩阵
+    的变化点数, 翻转序列字典序) 升序稳定排序，等价终态只保留排序最优的序列。
+    只读计算，不修改原设计；设计不存在返回 404，无改善返回空数组。"""
+    stored = db.get_design(design_id)
+    if stored is None:
+        raise HTTPException(status_code=404, detail=f"design {design_id} not found")
+    plans = weave.search_repair_plans(
+        stored["threading"],
+        stored["tie_up"],
+        stored["treadling"],
+        stored["max_float"],
+        stored["cyclic"],
+        max_changes=max_changes,
+    )
+    return [p.to_dict() for p in plans[:limit]]

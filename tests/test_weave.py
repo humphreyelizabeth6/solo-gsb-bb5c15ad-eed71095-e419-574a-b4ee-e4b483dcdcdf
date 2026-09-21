@@ -9,6 +9,7 @@ from app.weave import (  # noqa: E402
     DesignError,
     audit_floats,
     build_interlacing,
+    search_repair_plans,
     suggest_tie_up_flips,
     validate_design,
     _runs,
@@ -142,6 +143,94 @@ def test_tie_up_suggestions_no_improvement():
           "empty list when no flip improves")
 
 
+def test_repair_plans_basic():
+    # 列 1 1 0 1 1 循环合并为长度 4 的经向浮长（max_float=2），共 1 条违规
+    threading = [0]
+    tie_up = [[1], [0]]
+    treadling = [0, 0, 1, 0, 0]
+    plans = search_repair_plans(threading, tie_up, treadling, 2, True, max_changes=2)
+    # 1 步方案 tie_up[0][0]->0 直接清零；2 步方案仅 (0,0)+(1,0) 可行
+    check(len(plans) == 2, "one 1-step and one 2-step plan")
+    best = plans[0]
+    check(best.changes == 1 and best.final_violations == 0,
+          "best plan is the 1-step full repair")
+    check(best.changed_points == 4, "4 interlacing points changed vs original")
+    flip = best.flips[0]
+    check(flip.treadle == 0 and flip.shaft == 0 and flip.new_value == 0
+          and flip.violations_after == 0,
+          "flip tie_up[0][0] to 0 with zero violations after")
+    check(best.interlacing == [[0]] * 5, "final interlacing all 0")
+    check(best.violations == [], "final violation list empty")
+    check(tie_up == [[1], [0]], "original tie_up unchanged")
+    # 2 步方案：同一单元不重复翻转，序列按字典序升序
+    two = plans[1]
+    check(two.changes == 2 and len(two.flips) == 2, "second plan takes 2 flips")
+    check([(f.treadle, f.shaft) for f in two.flips]
+          == sorted((f.treadle, f.shaft) for f in two.flips),
+          "flip sequence in lexicographic order")
+
+
+def test_repair_plans_intermediate_may_stay_worse():
+    # 原矩阵两行全长纬浮，共 2 条违规（max_float=1）；任何单步翻转都无法
+    # 严格减少（故 max_changes=1 返回空），但 2 步可降到 1，且中间状态
+    # 违规数保持为 2（不下降）
+    threading = [0, 1, 1]
+    tie_up = [[0, 0], [0, 1]]
+    treadling = [0, 1, 0]
+    check(search_repair_plans(threading, tie_up, treadling, 1, False,
+                              max_changes=1) == [],
+          "no plan within 1 flip")
+    plans = search_repair_plans(threading, tie_up, treadling, 1, False,
+                                max_changes=2)
+    check(len(plans) == 1, "exactly one 2-flip plan")
+    p = plans[0]
+    check(p.changes == 2 and p.final_violations == 1,
+          "2 flips leave 1 violation")
+    check(p.flips[0].violations_after == 2,
+          "intermediate violation count is allowed to stay at 2")
+    check(p.flips[1].violations_after == 1, "final violation count is 1")
+    check(p.changed_points == 6, "all 6 interlacing points differ from original")
+    check(tie_up == [[0, 0], [0, 1]], "original tie_up unchanged")
+
+
+def test_repair_plans_sorting_and_dedup():
+    # 3 根经纱各浮 3 纬 + 末纬纬浮 3 经，共 4 条违规
+    threading = [0, 1, 1]
+    tie_up = [[1, 1], [0, 0]]
+    treadling = [0, 0, 0, 1]
+    plans = search_repair_plans(threading, tie_up, treadling, 2, False,
+                                max_changes=3)
+    keys = [
+        (p.final_violations, p.changes, p.changed_points,
+         [(f.treadle, f.shaft) for f in p.flips])
+        for p in plans
+    ]
+    check(keys == sorted(keys),
+          "plans sorted by final violations, changes, changed points, sequence")
+    for p in plans:
+        seq = [(f.treadle, f.shaft) for f in p.flips]
+        check(len(set(seq)) == len(seq), "no cell flipped twice in a plan")
+        check(seq == sorted(seq), "flip sequence is the lexicographically minimal one")
+        check(p.changes <= 3, "no plan exceeds max_changes")
+        check(p.final_violations < 4, "every plan strictly improves")
+    # 等价终态唯一：同一绑综终态（翻转单元集合）只出现一次
+    end_states = [
+        frozenset((f.treadle, f.shaft) for f in p.flips) for p in plans
+    ]
+    check(len(end_states) == len(set(end_states)),
+          "equivalent end states are deduplicated")
+
+
+def test_repair_plans_no_violations_empty():
+    # 平纹无违规：无法比 0 更少，返回空列表
+    threading = [0, 1, 0, 1]
+    tie_up = [[1, 0], [0, 1]]
+    treadling = [0, 1, 0, 1]
+    check(search_repair_plans(threading, tie_up, treadling, 2, False,
+                              max_changes=3) == [],
+          "empty plan list when design already complies")
+
+
 def test_validation():
     ok_cases = []
     # 维度不一致：绑综矩阵不是矩形
@@ -192,5 +281,9 @@ if __name__ == "__main__":
     test_tie_up_suggestions_basic()
     test_tie_up_suggestions_ordering()
     test_tie_up_suggestions_no_improvement()
+    test_repair_plans_basic()
+    test_repair_plans_intermediate_may_stay_worse()
+    test_repair_plans_sorting_and_dedup()
+    test_repair_plans_no_violations_empty()
     test_validation()
     print("all tests passed")

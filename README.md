@@ -5,7 +5,9 @@
 找出所有超过上限的**经向 / 纬向连续浮长**；纹样声明循环时，自动合并矩阵
 首尾跨边界的连续段。合法设计与审计结果入库，可按 ID 查询；维度不一致或
 索引越界的设计将被整份拒绝（HTTP 400，不入库）。对超限设计，还可请求
-**单步绑综修复建议**：逐一翻转一个绑综单元重跑审计，给出违规减少的候选。
+**单步绑综修复建议**：逐一翻转一个绑综单元重跑审计，给出违规减少的候选；
+或请求**多步修复方案**：在至多 3 次绑综翻转内搜索最终违规严格减少的方案
+（中间状态允许违规数不下降）。
 
 ## 快速启动
 
@@ -85,6 +87,7 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
 | `GET` | `/designs/{id}` | 按 ID 查询设计及其审计结果 |
 | `GET` | `/designs/{id}/audit` | 按设计 ID 单独查询审计结果 |
 | `POST` | `/designs/{id}/tie-up-suggestions` | 单步绑综修复建议：逐一翻转一个绑综单元重跑审计，返回违规减少的候选 |
+| `POST` | `/designs/{id}/repair-plans` | 多步绑综修复方案：至多 `max_changes` 次翻转内搜索最终违规严格减少的方案 |
 | `GET` | `/health` | 健康检查 |
 
 ### 示例：提交设计
@@ -174,6 +177,70 @@ curl -s -X POST 'http://localhost:8000/designs/1/tie-up-suggestions?limit=5'
   {"treadle": 0, "shaft": 1, "new_value": 0, "remaining_violations": 2, "affected_points": 6},
   {"treadle": 1, "shaft": 0, "new_value": 1, "remaining_violations": 3, "affected_points": 1}
 ]
+```
+
+### 多步绑综修复方案
+
+`POST http://localhost:8000/designs/{id}/repair-plans`：读取已入库设计，在
+**至多 `max_changes` 次绑综 0/1 单元翻转**（1～3，默认 2）内搜索修复方案。
+搜索广度优先展开：
+
+- **中间状态允许违规数不下降**（允许先经过更差或持平的状态），只有
+  **最终违规总数严格少于原设计**才记为一个方案；
+- 按**绑综状态去重**，同一序列内**同一单元不重复翻转**；每个绑综终态只
+  保留翻转序列**字典序最小**的路径（按踏板索引、综框索引排序）；
+- 结果按 `final_violations` → `changes` → `changed_points` → 翻转序列
+  字典序升序稳定排序。
+
+接口只读计算，**不修改原设计**；设计不存在返回 **404**，翻遍搜索深度仍无
+改善时返回空数组 `[]`。
+
+查询参数：
+
+| 参数 | 范围 | 默认 | 说明 |
+| --- | --- | --- | --- |
+| `max_changes` | 1～3 | `2` | 最多搜索的绑综翻转次数 |
+| `limit` | 1～50 | `50` | 返回方案数上限 |
+
+每个方案包含：
+
+| 字段 | 说明 |
+| --- | --- |
+| `changes` | 翻转次数（1～`max_changes`） |
+| `final_violations` | 最终交织矩阵的违规总数 |
+| `changed_points` | 最终矩阵相对原矩阵取值变化的单元数 |
+| `flips` | 每一步翻转（按执行顺序）：`treadle`、`shaft`、`new_value` 与该步之后的违规数 `violations_after` |
+| `interlacing` | 最终经纬交织矩阵 |
+| `violations` | 最终违规列表（字段同审计接口） |
+
+```bash
+curl -s -X POST 'http://localhost:8000/designs/1/repair-plans?max_changes=2&limit=10'
+```
+
+响应（200，示例：首步违规数持平 2、最终降到 1 的 2 步方案）：
+
+```json
+[
+  {
+    "changes": 2,
+    "final_violations": 1,
+    "changed_points": 6,
+    "flips": [
+      {"treadle": 0, "shaft": 1, "new_value": 1, "violations_after": 2},
+      {"treadle": 1, "shaft": 1, "new_value": 0, "violations_after": 1}
+    ],
+    "interlacing": [[0, 1, 1], [0, 0, 0], [0, 1, 1]],
+    "violations": [
+      {"direction": "weft", "yarn_index": 1, "start": 0, "length": 3}
+    ]
+  }
+]
+```
+
+无任何改善时：
+
+```json
+[]
 ```
 
 ### 拒绝情形（HTTP 400，整份设计不入库）

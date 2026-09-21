@@ -111,5 +111,31 @@ class TieUpSuggestionOut(BaseModel):
     )
 
 
+class RepairFlipOut(BaseModel):
+    """修复序列中的一步绑综翻转。"""
+
+    treadle: int = Field(..., description="踏板索引（tie_up 行号）")
+    shaft: int = Field(..., description="综框索引（tie_up 列号）")
+    new_value: Literal[0, 1] = Field(..., description="该单元翻转后的新值")
+    violations_after: int = Field(..., description="本次翻转后完整审计的违规总数")
+
+
+class RepairPlanOut(BaseModel):
+    """多步绑综修复方案：最终违规总数严格少于原设计（不修改原设计）。"""
+
+    changes: int = Field(..., description="翻转次数（1～max_changes）")
+    final_violations: int = Field(..., description="最终交织矩阵的违规总数")
+    changed_points: int = Field(
+        ..., description="最终矩阵相对原矩阵取值发生变化的单元数"
+    )
+    flips: list[RepairFlipOut] = Field(
+        ..., description="每一步翻转（按执行顺序）"
+    )
+    interlacing: list[list[int]] = Field(
+        ..., description="最终交织矩阵，1=经纱在上，0=纬纱在上"
+    )
+    violations: list[Violation] = Field(..., description="最终违规列表")
+
+
 class ErrorOut(BaseModel):
     detail: str
