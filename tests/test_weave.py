@@ -9,6 +9,7 @@ from app.weave import (  # noqa: E402
     DesignError,
     audit_floats,
     build_interlacing,
+    search_repair_plans,
     suggest_tie_up_flips,
     validate_design,
     _runs,
@@ -142,6 +143,98 @@ def test_tie_up_suggestions_no_improvement():
           "empty list when no flip improves")
 
 
+def test_repair_plans_two_flips_needed():
+    # 单列 6 纬全 1，cyclic 下整列一段长度 6，max_float=2：1 条经向违规。
+    # 每个踏板各踩 1 纬，单次翻转只产生 1 个 0，仍有 1 条违规（长度 5）；
+    # 循环上间隔恰为 3 的两次翻转把 1-段切成三段各长 2，违规清零。
+    threading = [0]
+    tie_up = [[1], [1], [1], [1], [1], [1]]
+    treadling = [0, 1, 2, 3, 4, 5]
+    _, base_v = audit_floats(threading, tie_up, treadling, 2, True)
+    check(len(base_v) == 1, "baseline has exactly one violation")
+
+    plans = search_repair_plans(threading, tie_up, treadling, 2, True,
+                                max_changes=1)
+    check(plans == [], "no improving plan within 1 flip")
+
+    plans = search_repair_plans(threading, tie_up, treadling, 2, True,
+                                max_changes=2)
+    # 循环 6 点上两个 0 间隔恰为 3 时三段各长 2：恰 3 个方案
+    check(len(plans) == 3, f"3 two-flip plans, got {len(plans)}")
+    seq0 = [(s.treadle, s.shaft) for s in plans[0].steps]
+    check(seq0 == [(0, 0), (3, 0)], "lexicographically smallest sequence first")
+    check([(s.treadle, s.shaft) for s in plans[1].steps] == [(1, 0), (4, 0)]
+          and [(s.treadle, s.shaft) for s in plans[2].steps] == [(2, 0), (5, 0)],
+          "remaining plans in lexicographic order")
+    for p in plans:
+        check(p.changes == 2 and p.final_violations == 0,
+              "every plan uses 2 flips and clears violations")
+        check(p.changed_points == 2, "2 interlacing points changed")
+        check(len(p.steps) == 2 and p.steps[0].step == 1 and p.steps[1].step == 2,
+              "steps are numbered 1..2")
+        check(p.steps[0].old_value == 1 and p.steps[0].new_value == 0
+              and p.steps[1].old_value == 1 and p.steps[1].new_value == 0,
+              "flips 1 -> 0 with correct old/new values")
+        check(p.steps[0].violations_after == 1,
+              "intermediate state may keep violations unchanged")
+        check(p.violations == [], "final violation list empty")
+        check(sum(x for row in p.interlacing for x in row) == 4,
+              "final matrix has exactly two zeros")
+    check(tie_up == [[1], [1], [1], [1], [1], [1]],
+          "original tie_up unchanged")
+
+
+def test_repair_plans_state_dedup():
+    # 同一绑综终态可由不同翻转序列到达：按状态去重，只保留字典序最小序列。
+    # 2 踏 2 综，单列单纬时仅被踩踏板所提升的综框影响矩阵；构造多步搜索，
+    # 验证终态去重（无重复终态）且原设计不被修改。
+    threading = [0, 1]
+    tie_up = [[1, 1], [0, 0]]
+    treadling = [0, 0, 0, 1]
+    plans = search_repair_plans(threading, tie_up, treadling, 2, False,
+                                max_changes=3, limit=50)
+    finals = []
+    for p in plans:
+        check(p.final_violations < 4, "plan strictly improves over baseline")
+        # 同一单元在一条序列内不重复出现
+        coords = [(s.treadle, s.shaft) for s in p.steps]
+        check(len(coords) == len(set(coords)),
+              "no cell flipped twice within one sequence")
+        finals.append(tuple(tuple(row) for row in p.interlacing))
+    check(len(finals) == len(set(finals)),
+          "equivalent final states deduplicated")
+    # 排序键：最终违规数、改动数、变化点数、序列字典序
+    keys = [
+        (p.final_violations, p.changes, p.changed_points,
+         tuple((s.treadle, s.shaft) for s in p.steps))
+        for p in plans
+    ]
+    check(keys == sorted(keys), "plans sorted by the declared key")
+    check(tie_up == [[1, 1], [0, 0]], "original tie_up unchanged")
+
+
+def test_repair_plans_limit_and_validation():
+    threading = [0]
+    tie_up = [[1], [1], [1], [1], [1], [1]]
+    treadling = [0, 1, 2, 3, 4, 5]
+    plans = search_repair_plans(threading, tie_up, treadling, 2, True,
+                                max_changes=2, limit=2)
+    check(len(plans) == 2, "limit caps the number of plans")
+    for bad in (0, 4):
+        try:
+            search_repair_plans(threading, tie_up, treadling, 2, True,
+                                max_changes=bad)
+            raise AssertionError(f"max_changes={bad} should be rejected")
+        except DesignError:
+            pass
+    try:
+        search_repair_plans(threading, tie_up, treadling, 2, True, limit=0)
+        raise AssertionError("limit=0 should be rejected")
+    except DesignError:
+        pass
+    print("  ok: repair plan parameter validation")
+
+
 def test_validation():
     ok_cases = []
     # 维度不一致：绑综矩阵不是矩形
@@ -192,5 +285,8 @@ if __name__ == "__main__":
     test_tie_up_suggestions_basic()
     test_tie_up_suggestions_ordering()
     test_tie_up_suggestions_no_improvement()
+    test_repair_plans_two_flips_needed()
+    test_repair_plans_state_dedup()
+    test_repair_plans_limit_and_validation()
     test_validation()
     print("all tests passed")

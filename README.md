@@ -5,7 +5,9 @@
 找出所有超过上限的**经向 / 纬向连续浮长**；纹样声明循环时，自动合并矩阵
 首尾跨边界的连续段。合法设计与审计结果入库，可按 ID 查询；维度不一致或
 索引越界的设计将被整份拒绝（HTTP 400，不入库）。对超限设计，还可请求
-**单步绑综修复建议**：逐一翻转一个绑综单元重跑审计，给出违规减少的候选。
+**单步绑综修复建议**：逐一翻转一个绑综单元重跑审计，给出违规减少的候选；
+以及**多步修复方案搜索**：在 1～3 次绑综翻转内搜索最终违规严格减少的方案
+（中间状态允许违规数不下降）。
 
 ## 快速启动
 
@@ -85,6 +87,7 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
 | `GET` | `/designs/{id}` | 按 ID 查询设计及其审计结果 |
 | `GET` | `/designs/{id}/audit` | 按设计 ID 单独查询审计结果 |
 | `POST` | `/designs/{id}/tie-up-suggestions` | 单步绑综修复建议：逐一翻转一个绑综单元重跑审计，返回违规减少的候选 |
+| `POST` | `/designs/{id}/repair-plans` | 多步绑综修复方案：1～3 次翻转内搜索最终违规严格减少的方案，支持 `max_changes`、`limit` |
 | `GET` | `/health` | 健康检查 |
 
 ### 示例：提交设计
@@ -173,6 +176,64 @@ curl -s -X POST 'http://localhost:8000/designs/1/tie-up-suggestions?limit=5'
 [
   {"treadle": 0, "shaft": 1, "new_value": 0, "remaining_violations": 2, "affected_points": 6},
   {"treadle": 1, "shaft": 0, "new_value": 1, "remaining_violations": 3, "affected_points": 1}
+]
+```
+
+### 多步绑综修复方案
+
+`POST http://localhost:8000/designs/{id}/repair-plans`：读取已入库设计，
+在最多 `max_changes`（1～3，默认 **2**）次 `tie_up` 0/1 单元翻转内广度优先
+搜索修复方案。**中间状态允许违规数不下降**（容许先变差或持平），但方案终态
+的违规总数必须**严格少于原设计**。搜索按绑综状态（整个 `tie_up` 的 0/1 位图）
+去重，同一单元不会在一条翻转序列内重复翻转；等价终态（相同绑综状态）只保留
+排序最优的翻转序列。接口只读计算，**不修改原设计**；设计不存在返回 404，
+没有改善方案时返回空列表 `[]`。
+
+查询参数：
+
+| 参数 | 范围 | 默认 | 说明 |
+| --- | --- | --- | --- |
+| `max_changes` | 1～3 | `2` | 最多翻转绑综单元的次数 |
+| `limit` | 1～50 | `50` | 返回方案数上限 |
+
+方案排序键（依次升序，稳定排序）：最终违规数 → 改动数（翻转次数）→
+最终交织矩阵相对原矩阵的**变化点数** → 翻转序列字典序（按
+`(treadle, shaft)` 依次比较）。
+
+每个方案包含：
+
+| 字段 | 说明 |
+| --- | --- |
+| `changes` | 翻转次数（1～`max_changes`） |
+| `final_violations` | 最终违规总数（严格小于原设计） |
+| `changed_points` | 最终交织矩阵相对原矩阵取值变化的点数 |
+| `steps[]` | 逐步翻转：`step`（从 1 起）、`treadle`、`shaft`、`old_value`、`new_value`、`violations_after`（该步翻转后的违规总数，允许不下降） |
+| `violations[]` | 最终违规列表（字段同审计结果） |
+| `interlacing[][]` | 最终交织矩阵（1=经纱在上，0=纬纱在上） |
+
+```bash
+# 默认最多翻转 2 次，最多返回 50 个方案
+curl -s -X POST http://localhost:8000/designs/2/repair-plans
+
+# 最多 3 次翻转，只取前 5 个方案
+curl -s -X POST 'http://localhost:8000/designs/2/repair-plans?max_changes=3&limit=5'
+```
+
+响应（200）：
+
+```json
+[
+  {
+    "changes": 2,
+    "final_violations": 0,
+    "changed_points": 2,
+    "steps": [
+      {"step": 1, "treadle": 0, "shaft": 0, "old_value": 1, "new_value": 0, "violations_after": 1},
+      {"step": 2, "treadle": 3, "shaft": 0, "old_value": 1, "new_value": 0, "violations_after": 0}
+    ],
+    "violations": [],
+    "interlacing": [[0], [1], [1], [0], [1], [1]]
+  }
 ]
 ```
 
